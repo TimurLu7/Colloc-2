@@ -9,7 +9,6 @@
 #include <iomanip>
 
 #include "nlohmann/json.hpp"
-
 #include "httplib.h"
 
 using json = nlohmann::json;
@@ -20,7 +19,7 @@ public:
     int id;
     std::string title;
     std::string description;
-    std::string status; 
+    std::string status;
     std::string create_time;
     std::string update_time;
 
@@ -33,7 +32,8 @@ public:
 
     void setTime() {
         auto t = std::time(nullptr);
-        auto tm = *std::localtime(&t);
+        std::tm tm;
+        localtime_s(&tm, &t);
         std::ostringstream oss;
         oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
         create_time = oss.str();
@@ -42,21 +42,28 @@ public:
 
     void updateTime() {
         auto t = std::time(nullptr);
-        auto tm = *std::localtime(&t);
+        std::tm tm;
+        localtime_s(&tm, &t);
         std::ostringstream oss;
         oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
         update_time = oss.str();
     }
 
     json toJson() const {
-        return {
-            {"id", id},
-            {"title", title},
-            {"description", description},
-            {"status", status},
-            {"create_time", create_time},
-            {"update_time", update_time}
-        };
+        try {
+            return json{
+                {"id", id},
+                {"title", title},
+                {"description", description},
+                {"status", status},
+                {"create_time", create_time},
+                {"update_time", update_time}
+            };
+        }
+        catch (const std::exception& e) {
+            std::cerr << "error in Task::toJson: " << e.what() << std::endl;
+            return json{ {"error", "Failed to serialize task"} };
+        }
     }
 
     static Task fromJson(const json& j) {
@@ -68,12 +75,11 @@ public:
     }
 };
 
-
 class TaskStorage {
 private:
     std::map<int, Task> tasks;
     int nextId = 1;
-    std::mutex mtx;
+    mutable std::mutex mtx;
 
 public:
     Task createTask(const Task& task) {
@@ -86,20 +92,21 @@ public:
     }
 
     std::vector<Task> getAllTasks() const {
+        std::lock_guard<std::mutex> lock(mtx);
         std::vector<Task> result;
         for (const auto& pair : tasks) {
             result.push_back(pair.second);
-        }  
+        }
         return result;
     }
 
     Task getTask(int id) const {
-        Task emptyTask;
+        std::lock_guard<std::mutex> lock(mtx);
         auto it = tasks.find(id);
         if (it != tasks.end()) {
             return it->second;
         }
-        return emptyTask;
+        return Task(); 
     }
 
     bool updateTask(int id, const Task& updatedTask) {
@@ -173,23 +180,42 @@ public:
             res.status = 200;
             });
 
-        svr.Get("/tasks", [this](const Request& req, Response& res) {
-            auto tasks = taskStorage.getAllTasks();
-            json response;
-            for (const auto& task : tasks) {
-                response.push_back(task.toJson());
-            }
+        svr.Get("/status", [this](const Request& req, Response& res) {
+            json response = {
+                {"status", "ok"},
+                {"tasks_count", taskStorage.count()},
+                {"service", "Todo API"}
+            };
             res.set_content(response.dump(), "application/json");
+            });
+
+        svr.Get("/tasks", [this](const Request& req, Response& res) {
+            try {
+                auto tasks = taskStorage.getAllTasks();
+                std::cout << "Tasks count: " << tasks.size() << std::endl;
+
+                json response = json::array();
+                for (const auto& task : tasks) {
+                    response.push_back(task.toJson());
+                }
+                res.set_content(response.dump(), "application/json");
+            }
+            catch (const std::exception& e) {
+                std::cerr << "error in GET /tasks: " << e.what() << std::endl;
+                res.status = 500;
+                res.set_content(
+                    json{ {"error", "Internal Server Error"}, {"details", e.what()} }.dump(),
+                    "application/json"
+                );
+            }
             });
 
         svr.Get("/tasks/(\\d+)", [this](const Request& req, Response& res) {
             int id = std::stoi(req.matches[1]);
             Task task = taskStorage.getTask(id);
 
-            if (task.id==0) {
-                json response;
-                response.push_back(task.toJson());
-                res.set_content(response.dump(), "application/json");
+            if (task.id != 0) {
+                res.set_content(task.toJson().dump(), "application/json");
             }
             else {
                 res.status = 404;
@@ -206,13 +232,12 @@ public:
                 Task created = taskStorage.createTask(newTask);
 
                 res.status = 201;
-                res.set_header("Location", "/tasks/" + std::to_string(created.id));
                 res.set_content(created.toJson().dump(), "application/json");
 
             }
             catch (const json::parse_error& e) {
                 res.status = 400;
-                json error = { {"error", "Invalid JSON format"} };
+                json error = { {"error", "Invalid JSON format"}, {"details", e.what()} };
                 res.set_content(error.dump(), "application/json");
             }
             });
@@ -225,9 +250,7 @@ public:
                 Task updatedTask = Task::fromJson(body);
                 if (taskStorage.updateTask(id, updatedTask)) {
                     Task task = taskStorage.getTask(id);
-                    json response;
-                    response.push_back(task.toJson());
-                    res.set_content(response.dump(), "application/json");
+                    res.set_content(task.toJson().dump(), "application/json");
                 }
                 else {
                     res.status = 404;
@@ -248,11 +271,16 @@ public:
                 int id = std::stoi(req.matches[1]);
                 json body = json::parse(req.body);
 
+                if (body.empty()) {
+                    res.status = 400;
+                    json error = { {"error", "No fields to update"} };
+                    res.set_content(error.dump(), "application/json");
+                    return;
+                }
+
                 if (taskStorage.patchTask(id, body)) {
                     Task task = taskStorage.getTask(id);
-                    json response;
-                    response.push_back(task.toJson());
-                    res.set_content(response.dump(), "application/json");
+                    res.set_content(task.toJson().dump(), "application/json");
                 }
                 else {
                     res.status = 404;
@@ -272,7 +300,7 @@ public:
             int id = std::stoi(req.matches[1]);
 
             if (taskStorage.deleteTask(id)) {
-                res.status = 204; 
+                res.status = 204;
             }
             else {
                 res.status = 404;
@@ -283,16 +311,19 @@ public:
     }
 
     void run() {
-        std::cout << "Starting TodoList API server on port " << port << std::endl;
+        std::cout << "________________________________________" << std::endl;
+        std::cout << "TodoList API Server" << std::endl;
+        std::cout << "Port: " << port << std::endl;
+        std::cout << "________________________________________" << std::endl;
         std::cout << "Endpoints:" << std::endl;
+        std::cout << "  GET    /status         - API status" << std::endl;
         std::cout << "  GET    /tasks          - Get all tasks" << std::endl;
         std::cout << "  GET    /tasks/{id}     - Get task by ID" << std::endl;
         std::cout << "  POST   /tasks          - Create new task" << std::endl;
         std::cout << "  PUT    /tasks/{id}     - Update task" << std::endl;
         std::cout << "  PATCH  /tasks/{id}     - Partially update task" << std::endl;
         std::cout << "  DELETE /tasks/{id}     - Delete task" << std::endl;
-        std::cout << "  GET    /status         - API status" << std::endl;
-        std::cout << std::endl << "Press Ctrl+C to stop the server" << std::endl;
+        std::cout << "________________________________________" << std::endl;
 
         initialize();
 
@@ -300,9 +331,8 @@ public:
     }
 
     void initialize() {
-        taskStorage.createTask(Task(0, "Купить молоко", "Обязательно 3.2% жирности", "todo"));
-        taskStorage.createTask(Task(0, "Запустить API", "Настроить и запустить сервер", "in_progress"));
-        taskStorage.createTask(Task(0, "Написать документацию", "Описать все эндпоинты", "todo"));
+        taskStorage.createTask(Task(0, "Buy milk", "Fat 3.2%", "todo"));
+        taskStorage.createTask(Task(0, "Run API", "Configure and start server", "in_progress"));
     }
 };
 
