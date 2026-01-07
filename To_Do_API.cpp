@@ -162,7 +162,25 @@ private:
     Server svr;
     TaskStorage taskStorage;
     int port = 8080;
+    bool checkJsonTasks(const json& body, json& error) {
+        if (!body.contains("title") || body["title"].empty()) {
+            error = { {"error", "Title is required"} };
+            return false;
+        }
 
+        if (body.contains("status")) {
+            std::string status = body["status"];
+            if (!isStatusValid(status)) {
+                error = {
+                    {"error", "Invalid status"},
+                    {"valid_statuses", {"todo", "in_progress", "done"}}
+                };
+                return false;
+            }
+        }
+
+        return true;
+    }
 public:
     TodoAPI(int port = 8080) : port(port) {
         setupEndpoints();
@@ -227,7 +245,13 @@ public:
         svr.Post("/tasks", [this](const Request& req, Response& res) {
             try {
                 json body = json::parse(req.body);
+                json validationError;
 
+                if (!checkJsonTasks(body, validationError)) {
+                    res.status = 400;
+                    res.set_content(validationError.dump(), "application/json");
+                    return;
+                }
                 Task newTask = Task::fromJson(body);
                 Task created = taskStorage.createTask(newTask);
 
@@ -246,7 +270,13 @@ public:
             try {
                 int id = std::stoi(req.matches[1]);
                 json body = json::parse(req.body);
+                json validationError;
 
+                if (!checkJsonTasks(body, validationError)) {
+                    res.status = 400;
+                    res.set_content(validationError.dump(), "application/json");
+                    return;
+                }
                 Task updatedTask = Task::fromJson(body);
                 if (taskStorage.updateTask(id, updatedTask)) {
                     Task task = taskStorage.getTask(id);
