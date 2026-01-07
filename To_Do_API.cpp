@@ -307,7 +307,18 @@ public:
                     res.set_content(error.dump(), "application/json");
                     return;
                 }
-
+                if (body.contains("status")) {
+                    std::string status = body["status"];
+                    if (!isStatusValid(status)) {
+                        res.status = 400;
+                        json error = {
+                            {"error", "Invalid status"},
+                            {"valid_statuses", {"todo", "in_progress", "done"}}
+                        };
+                        res.set_content(error.dump(), "application/json");
+                        return;
+                    }
+                }
                 if (taskStorage.patchTask(id, body)) {
                     Task task = taskStorage.getTask(id);
                     res.set_content(task.toJson().dump(), "application/json");
@@ -342,7 +353,7 @@ public:
 
     void run() {
         std::cout << "________________________________________" << std::endl;
-        std::cout << "TodoList API Server" << std::endl;
+        std::cout << "Todo API Server" << std::endl;
         std::cout << "Port: " << port << std::endl;
         std::cout << "________________________________________" << std::endl;
         std::cout << "Endpoints:" << std::endl;
@@ -363,6 +374,7 @@ public:
     void initialize() {
         taskStorage.createTask(Task(0, "Buy milk", "Fat 3.2%", "todo"));
         taskStorage.createTask(Task(0, "Run API", "Configure and start server", "in_progress"));
+        taskStorage.createTask(Task(0, "Explore Postman", "Check REST API", "done"));
     }
 };
 
